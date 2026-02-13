@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     # Document processing
     CHUNK_SIZE: int = 800
     CHUNK_OVERLAP: int = 150
-    MAX_FILE_SIZE_MB: int = 50
+    MAX_FILE_SIZE_MB: int = 100
     SUPPORTED_FILE_TYPES: List[str] = [
         "application/pdf",
         "text/plain",

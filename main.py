@@ -1,7 +1,7 @@
 """
 Main FastAPI application for document embedding service
 """
-from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
+from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Form
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
 import logging
@@ -155,11 +155,10 @@ async def extract_text(
         raise HTTPException(status_code=500, detail=f"Text extraction failed: {str(e)}")
 
 
-@app.post("/upload", response_model=DocumentResponse)
+@app.post("/upload-document", response_model=DocumentResponse)
 async def upload_document(
         file: UploadFile = File(...),
         background_tasks: BackgroundTasks = None,
-        user_id: Optional[str] = None,
         metadata: Optional[str] = None
 ):
     """
@@ -185,7 +184,6 @@ async def upload_document(
             file_content=content,
             filename=file.filename,
             file_type=file.content_type,
-            user_id=user_id,
             additional_metadata=metadata
         )
 
@@ -214,15 +212,14 @@ async def upload_document(
 
 @app.post("/upload-batch", response_model=List[DocumentResponse])
 async def upload_batch(
-        files: List[UploadFile] = File(...),
-        user_id: Optional[str] = None
+        files: List[UploadFile] = File(...)
 ):
     """Upload multiple documents at once"""
     results = []
 
     for file in files:
         try:
-            result = await upload_document(file=file, user_id=user_id)
+            result = await upload_document(file=file)
             results.append(result)
         except Exception as e:
             logger.error(f"Failed to process {file.filename}: {e}")
@@ -242,21 +239,28 @@ async def upload_batch(
 @app.post("/upload-textbook", response_model=DocumentResponse)
 async def upload_textbook(
         file: UploadFile = File(...),
+        book_name: str = Form(...),
+        publisher: str = Form(...),
         background_tasks: BackgroundTasks = None,
-        user_id: Optional[str] = None
+        grade: Optional[str] = Form(None),
+        product_name: Optional[str] = Form(None)
 ):
     """
     Upload and process a textbook document with enhanced metadata
     
+    Args:
+        file: The textbook file to upload
+        book_name: Name of the book (required)
+        publisher: Publisher name (required)
+        grade: Grade level (optional)
+        product_name: Optional custom name for the textbook (overrides generated name)
+    
     Supports enhanced features for textbook files:
-    - Parses filename for book information (SGK_TIN_CD_3 format)
     - Tracks page numbers for each chunk
     - Includes subject, publisher, grade information
+    - Allows custom product name override
     
-    Expected filename format: SGK_SUBJECT_PUBLISHER_GRADE.pdf
-    Example: SGK_TIN_CD_3.pdf -> Sách giáo khoa Tin học Cánh Diều lớp 3
-    
-    Use case: Upload textbooks for students with authentic source information
+    Use case: Upload textbooks for students with metadata information
     """
     try:
         logger.info(f"Processing textbook file: {file.filename}")
@@ -265,7 +269,13 @@ async def upload_textbook(
         if not file.filename:
             raise HTTPException(status_code=400, detail="Invalid file")
 
-        # Check if filename follows textbook naming convention
+        # Validate required fields
+        if not book_name or not book_name.strip():
+            raise HTTPException(status_code=400, detail="Book name is required")
+        if not publisher or not publisher.strip():
+            raise HTTPException(status_code=400, detail="Publisher is required")
+
+        # Check if filename follows textbook naming convention (optional warning)
         if not file.filename.upper().startswith(('SGK_', 'SBT_', 'STK_')):
             logger.warning(f"Filename {file.filename} doesn't follow textbook convention")
 
@@ -277,7 +287,10 @@ async def upload_textbook(
             file_content=content,
             filename=file.filename,
             file_type=file.content_type,
-            user_id=user_id
+            book_name=book_name,
+            publisher=publisher,
+            grade=grade,
+            product_name=product_name
         )
 
         # Store in Qdrant

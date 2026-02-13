@@ -63,7 +63,6 @@ class ChunkMetadata(BaseModel):
     total_chunks: int
     filename: str
     file_type: str
-    user_id: Optional[str] = None
     upload_date: datetime = Field(default_factory=datetime.utcnow)
     source_page: Optional[int] = None
     language: Optional[str] = None

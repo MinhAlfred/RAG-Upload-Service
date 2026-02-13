@@ -29,7 +29,10 @@ class EmbeddingService:
         file_content: bytes,
         filename: str,
         file_type: str,
-        user_id: Optional[str] = None,
+        book_name: str,
+        publisher: str,
+        grade: Optional[str] = None,
+        product_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Process a textbook document with enhanced metadata including page numbers
@@ -51,8 +54,13 @@ class EmbeddingService:
 
             logger.info(f"Processing textbook {filename} ({file_type}, {file_size_mb:.2f}MB)")
 
-            # Parse textbook metadata from filename
-            book_metadata = self.document_processor.parse_textbook_metadata(filename)
+            # Create book metadata from API parameters
+            book_metadata = {
+                "book_name": book_name.strip(),
+                "publisher": publisher.strip(),
+                "grade": grade.strip() if grade else None,
+                "full_name": f"{book_name.strip()} - {publisher.strip()}" + (f" - {grade.strip()}" if grade else "")
+            }
 
             # Extract text with page information (only for PDF currently)
             if file_type == "application/pdf":
@@ -94,10 +102,10 @@ class EmbeddingService:
                         "file_hash": file_hash,
                         "chunk_index": idx,
                         "total_chunks": len(chunks_with_pages),
-                        "user_id": user_id,
+                        # Product name from API input
+                        "product_name": product_name or book_metadata["full_name"],
                         # Textbook specific metadata
-                        "book_type": book_metadata["book_type"],
-                        "subject": book_metadata["subject"],
+                        "book_name": book_metadata["book_name"],
                         "publisher": book_metadata["publisher"],
                         "grade": book_metadata["grade"],
                         "book_full_name": book_metadata["full_name"],
@@ -121,12 +129,16 @@ class EmbeddingService:
             else:
                 # For non-PDF files, fall back to regular processing
                 logger.info(f"Non-PDF file, using regular processing for {filename}")
+                # Prepare additional metadata for non-PDF files
+                additional_meta = {
+                    "book_metadata": book_metadata,
+                    "product_name": product_name or book_metadata["full_name"]
+                }
                 return await self.process_document(
                     file_content=file_content,
                     filename=filename,
                     file_type=file_type,
-                    user_id=user_id,
-                    additional_metadata=f'{{"book_metadata": {book_metadata}}}'
+                    additional_metadata=f'{additional_meta}'
                 )
 
         except Exception as e:
@@ -172,7 +184,6 @@ class EmbeddingService:
         file_content: bytes,
         filename: str,
         file_type: str,
-        user_id: Optional[str] = None,
         additional_metadata: Optional[str] = None
     ) -> Dict[str, Any]:
         """
@@ -230,7 +241,6 @@ class EmbeddingService:
                     "file_hash": file_hash,
                     "chunk_index": idx,
                     "total_chunks": len(chunks),
-                    "user_id": user_id,
                 }
 
                 if additional_metadata:
