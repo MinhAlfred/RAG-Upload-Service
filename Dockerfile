@@ -14,17 +14,18 @@ RUN apt-get update && apt-get install -y \
     tesseract-ocr \
     tesseract-ocr-vie \
     tesseract-ocr-eng \
-    libgl1-mesa-glx \
+    libgl1 \
     libglib2.0-0 \
     libsm6 \
     libxext6 \
-    libxrender-dev \
+    libxrender1 \
     libgomp1 \
     libgtk-3-dev \
     libcairo-gobject2 \
-    libgdk-pixbuf2.0-dev \
+    libgdk-pixbuf-2.0-dev \
     libpango1.0-dev \
     libatk1.0-dev \
+    curl \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
