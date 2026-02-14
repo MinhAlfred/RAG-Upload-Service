@@ -1,0 +1,23 @@
+# Docker Compose override for development
+# This file is automatically used when running docker-compose in development
+
+version: '3.8'
+
+services:
+  ocr-embedding-service:
+    # Enable development mode
+    environment:
+      - DEBUG=true
+    
+    # Hot reload - mount source code as volume
+    volumes:
+      - ./:/app:ro
+      - uploads_data:/tmp/uploads
+      - ./logs:/app/logs
+    
+    # Override command for development with auto-reload
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    
+    # Development port mapping
+    ports:
+      - "8000:8000"

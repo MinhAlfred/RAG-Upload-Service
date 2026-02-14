@@ -1,0 +1,78 @@
+# Production Docker Compose Configuration
+version: '3.8'
+
+services:
+  ocr-embedding-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ocr-embedding-service:latest
+    container_name: ocr-embedding-prod
+    
+    # Production port
+    ports:
+      - "8000:8000"
+    
+    # Production environment
+    environment:
+      - APP_NAME=Document Embedding Service - Production
+      - DEBUG=false
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-text-embedding-3-small}
+      - EMBEDDING_DIMENSION=${EMBEDDING_DIMENSION:-1536}
+      - QDRANT_URL=${QDRANT_URL}
+      - QDRANT_API_KEY=${QDRANT_API_KEY}
+      - QDRANT_USE_CLOUD=${QDRANT_USE_CLOUD:-true}
+      - COLLECTION_NAME=${COLLECTION_NAME:-cs_chatbot_docs}
+      - CHUNK_SIZE=${CHUNK_SIZE:-800}
+      - CHUNK_OVERLAP=${CHUNK_OVERLAP:-150}
+      - MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-100}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-*}
+      - TEMP_UPLOAD_DIR=/tmp/uploads
+      - MAX_BATCH_SIZE=${MAX_BATCH_SIZE:-10}
+      - MAX_RETRIES=${MAX_RETRIES:-3}
+      - RETRY_DELAY=${RETRY_DELAY:-1}
+    
+    # Production volumes
+    volumes:
+      - uploads_data:/tmp/uploads
+      - ./logs:/app/logs
+    
+    # Production restart policy
+    restart: always
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+        reservations:
+          memory: 1G
+          cpus: '0.5'
+    
+    # Enhanced health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    
+    networks:
+      - ocr-network
+
+volumes:
+  uploads_data:
+    driver: local
+
+networks:
+  ocr-network:
+    driver: bridge
