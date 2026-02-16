@@ -111,7 +111,7 @@ class EmbeddingService:
                         "book_full_name": book_metadata["full_name"],
                         # Page information
                         "pages": chunk_info["pages"],
-                        "page_range": f"Trang {min(chunk_info['pages'])}-{max(chunk_info['pages'])}" if len(chunk_info['pages']) > 1 else f"Trang {chunk_info['pages'][0]}" if chunk_info['pages'] else "",
+                        "page_range": f"{min(chunk_info['pages'])}-{max(chunk_info['pages'])}" if len(chunk_info['pages']) > 1 else f"Trang {chunk_info['pages'][0]}" if chunk_info['pages'] else "",
                         "char_start": chunk_info["char_start"],
                         "char_end": chunk_info["char_end"]
                     }
