@@ -343,22 +343,22 @@ async def get_document_metadata(document_id: str):
     """Get metadata for a specific document"""
     try:
         # Search for document chunks to get metadata
-        points = await qdrant_service.search_documents(
+        points = await qdrant_service.search(
             collection_name=settings.COLLECTION_NAME,
             query_vector=[0.0] * 1536,  # Dummy vector
             limit=1,
-            filter_conditions={"must": [{"key": "document_id", "match": {"value": document_id}}]}
+            filter_dict={"document_id": document_id}
         )
         
         if not points:
             raise HTTPException(status_code=404, detail="Document not found")
         
         # Return metadata from first chunk (all chunks should have same document metadata)
-        metadata = points[0].payload
+        result = points[0]  # points is a list of formatted results
         
         return {
             "document_id": document_id,
-            "metadata": metadata,
+            "metadata": result["metadata"],
             "status": "success"
         }
         

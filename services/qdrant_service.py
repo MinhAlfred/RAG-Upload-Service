@@ -101,16 +101,21 @@ class QdrantService:
             for idx, (doc, emb, meta) in enumerate(zip(documents, embeddings, metadata)):
                 point_id = str(uuid.uuid4())
 
-                # Add document_id to metadata
-                meta["document_id"] = doc_id
-                meta["chunk_index"] = idx
-                meta["text"] = doc
-                meta["timestamp"] = datetime.utcnow().isoformat()
+                # Create new payload structure with text and metadata separated
+                payload = {
+                    "text": doc,
+                    "metadata": {
+                        **meta,  # Include all existing metadata fields
+                        "document_id": doc_id,
+                        "chunk_index": idx,
+                        "timestamp": datetime.utcnow().isoformat()
+                    }
+                }
 
                 point = PointStruct(
                     id=point_id,
                     vector=emb,
-                    payload=meta
+                    payload=payload
                 )
                 points.append(point)
 
@@ -170,10 +175,7 @@ class QdrantService:
                     "id": result.id,
                     "score": result.score,
                     "text": result.payload.get("text", ""),
-                    "metadata": {
-                        k: v for k, v in result.payload.items()
-                        if k != "text"
-                    }
+                    "metadata": result.payload.get("metadata", {})
                 })
 
             logger.info(f"Found {len(formatted_results)} results")
