@@ -8,7 +8,8 @@ from qdrant_client.models import (
     PointStruct,
     Filter,
     FieldCondition,
-    MatchValue
+    MatchValue,
+    PayloadSchemaType
 )
 from typing import List, Dict, Any, Optional
 import logging
@@ -73,6 +74,19 @@ class QdrantService:
                 logger.info(f"Collection created: {collection_name}")
             else:
                 logger.info(f"Collection already exists: {collection_name}")
+
+            # Ensure payload index exists for duplicate-detection field.
+            # Qdrant requires an index on a nested keyword field to filter reliably.
+            try:
+                await self.client.create_payload_index(
+                    collection_name=collection_name,
+                    field_name="metadata.file_hash",
+                    field_schema=PayloadSchemaType.KEYWORD
+                )
+                logger.info("Payload index ensured: metadata.file_hash")
+            except Exception as idx_err:
+                # Index may already exist – that is fine, log and continue
+                logger.debug(f"Payload index creation skipped (may already exist): {idx_err}")
 
         except Exception as e:
             logger.error(f"Failed to initialize collection: {e}")
@@ -147,13 +161,17 @@ class QdrantService:
         """Search for similar vectors"""
         try:
             # Build filter if provided
+            # Keys in filter_dict that refer to metadata fields must use "metadata.<key>" notation
             query_filter = None
             if filter_dict:
                 conditions = []
                 for key, value in filter_dict.items():
+                    # Automatically prefix bare keys with "metadata." so callers can pass
+                    # e.g. {"document_id": "..."} without worrying about nesting
+                    resolved_key = key if "." in key else f"metadata.{key}"
                     conditions.append(
                         FieldCondition(
-                            key=key,
+                            key=resolved_key,
                             match=MatchValue(value=value)
                         )
                     )
@@ -185,6 +203,43 @@ class QdrantService:
             logger.error(f"Search failed: {e}")
             raise
 
+    async def find_document_by_hash(
+            self,
+            collection_name: str,
+            file_hash: str
+    ) -> Optional[str]:
+        """
+        Find an existing document by its file hash (MD5 of raw bytes).
+        Returns the document_id string if a duplicate exists, None otherwise.
+        This check should be done BEFORE expensive OCR/embedding work.
+        """
+        try:
+            results, _ = await self.client.scroll(
+                collection_name=collection_name,
+                scroll_filter=Filter(
+                    must=[
+                        FieldCondition(
+                            key="metadata.file_hash",
+                            match=MatchValue(value=file_hash)
+                        )
+                    ]
+                ),
+                limit=1,
+                with_payload=True,
+                with_vectors=False
+            )
+            if results:
+                doc_id = results[0].payload.get("metadata", {}).get("document_id")
+                logger.info(f"Duplicate detected: hash={file_hash}, existing document_id={doc_id}")
+                return doc_id
+            logger.info(f"No duplicate found for hash={file_hash}")
+            return None
+        except Exception as e:
+            # Log as ERROR so this is never silently ignored
+            logger.error(f"[find_document_by_hash] Qdrant scroll failed for hash={file_hash}: {e}", exc_info=True)
+            # Re-raise so the caller can decide — do NOT silently allow duplicates through
+            raise
+
     async def delete_document(
             self,
             collection_name: str,
@@ -192,13 +247,13 @@ class QdrantService:
     ) -> bool:
         """Delete all chunks of a document"""
         try:
-            # Delete points with matching document_id
+            # Delete points with matching document_id (nested under metadata)
             await self.client.delete(
                 collection_name=collection_name,
                 points_selector=Filter(
                     must=[
                         FieldCondition(
-                            key="document_id",
+                            key="metadata.document_id",
                             match=MatchValue(value=document_id)
                         )
                     ]

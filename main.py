@@ -4,6 +4,7 @@ Main FastAPI application for document embedding service
 from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Form
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
+import hashlib
 import logging
 from contextlib import asynccontextmanager
 
@@ -179,6 +180,27 @@ async def upload_document(
         # Read file content
         content = await file.read()
 
+        # --- Duplicate detection (cheap hash check BEFORE OCR/embedding) ---
+        file_hash = hashlib.md5(content).hexdigest()
+        try:
+            existing_doc_id = await qdrant_service.find_document_by_hash(
+                collection_name=settings.COLLECTION_NAME,
+                file_hash=file_hash
+            )
+        except Exception as hash_err:
+            logger.error(f"Duplicate hash check failed (hash={file_hash}): {hash_err}", exc_info=True)
+            raise HTTPException(status_code=503, detail=f"Duplicate check failed: {hash_err}")
+
+        if existing_doc_id:
+            logger.info(f"Duplicate upload blocked: {file.filename} matches document {existing_doc_id}")
+            return DocumentResponse(
+                document_id=existing_doc_id,
+                filename=file.filename,
+                chunks_count=0,
+                status="duplicate",
+                message=f"File content already exists in the database (document_id: {existing_doc_id}). Upload skipped."
+            )
+
         # Process document based on type
         result = await embedding_service.process_document(
             file_content=content,
@@ -281,6 +303,27 @@ async def upload_textbook(
 
         # Read file content
         content = await file.read()
+
+        # --- Duplicate detection (cheap hash check BEFORE OCR/embedding) ---
+        file_hash = hashlib.md5(content).hexdigest()
+        try:
+            existing_doc_id = await qdrant_service.find_document_by_hash(
+                collection_name=settings.COLLECTION_NAME,
+                file_hash=file_hash
+            )
+        except Exception as hash_err:
+            logger.error(f"Duplicate hash check failed (hash={file_hash}): {hash_err}", exc_info=True)
+            raise HTTPException(status_code=503, detail=f"Duplicate check failed: {hash_err}")
+
+        if existing_doc_id:
+            logger.info(f"Duplicate upload blocked: {file.filename} matches document {existing_doc_id}")
+            return DocumentResponse(
+                document_id=existing_doc_id,
+                filename=file.filename,
+                chunks_count=0,
+                status="duplicate",
+                message=f"File content already exists in the database (document_id: {existing_doc_id}). Upload skipped."
+            )
 
         # Process textbook document with enhanced metadata
         result = await embedding_service.process_textbook_document(

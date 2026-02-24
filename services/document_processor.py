@@ -53,10 +53,13 @@ class DocumentProcessor:
                 # Try to extract text directly
                 text = page.get_text()
 
-                # If no text or very little text, likely a scanned PDF
-                if len(text.strip()) < 50:
+                # If no text, very little text, or garbled (encoding issue) → use OCR
+                if len(text.strip()) < 50 or self._is_text_garbled(text):
+                    if len(text.strip()) >= 50:
+                        logger.info(f"Page {page_num + 1}/{total_pages}: Text garbled/wrong encoding, falling back to OCR")
+                    else:
+                        logger.info(f"Page {page_num + 1}/{total_pages}: Scanned page detected, using OCR")
                     scanned_pages += 1
-                    logger.info(f"Page {page_num + 1}/{total_pages}: Scanned page detected, using OCR")
 
                     # Convert page to image and OCR
                     pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 2x zoom for better OCR
@@ -131,6 +134,50 @@ class DocumentProcessor:
         cleaned = '\n'.join(lines)
 
         return cleaned
+
+    def _is_text_garbled(self, text: str) -> bool:
+        """
+        Detect whether PDF-extracted text is garbled due to wrong font encoding.
+
+        Common cause: Vietnamese PDFs using legacy encodings (VNI, TCVN3/ABC,
+        Windows-1258) whose font glyph maps are not Unicode-compliant.
+        PyMuPDF reads the raw code points, which land in Cyrillic or other
+        non-Latin ranges instead of proper Unicode Vietnamese.
+
+        Returns True when the text should be discarded and OCR used instead.
+        """
+        if not text:
+            return True
+
+        # Work on a condensed sample (skip whitespace/newlines)
+        sample = text.replace(" ", "").replace("\n", "").replace("\t", "")
+        if len(sample) == 0:
+            return True
+
+        suspicious = 0
+        for ch in sample:
+            cp = ord(ch)
+            # Cyrillic block – the most common artifact from legacy Vietnamese fonts
+            if 0x0400 <= cp <= 0x04FF:
+                suspicious += 1
+            # Cyrillic Supplement
+            elif 0x0500 <= cp <= 0x052F:
+                suspicious += 1
+            # Private Use Area – some PDFs embed glyphs here
+            elif 0xE000 <= cp <= 0xF8FF:
+                suspicious += 1
+            # Combining Diacritical Marks Supplement (unusual outside linguistics)
+            elif 0x1DC0 <= cp <= 0x1DFF:
+                suspicious += 1
+
+        ratio = suspicious / len(sample)
+        if ratio > 0.08:  # >8 % suspicious chars → garbled
+            logger.debug(
+                f"Garbled text detected: {suspicious}/{len(sample)} suspicious chars "
+                f"({ratio:.1%}), sample={sample[:60]!r}"
+            )
+            return True
+        return False
 
     def _find_chunk_pages(self, chunk_start: int, chunk_end: int, page_info: List[Dict]) -> List[int]:
         """
