@@ -59,6 +59,11 @@ class Settings(BaseSettings):
     # Batch processing
     MAX_BATCH_SIZE: int = 10
 
+    # LLM Metadata Enrichment (Contextual Retrieval)
+    LLM_ENRICHMENT_ENABLED: bool = True
+    LLM_ENRICHMENT_MODEL: str = "gpt-4o-mini"   # cost-efficient; change to gpt-4o for higher quality
+    LLM_ENRICHMENT_CONCURRENCY: int = 5         # parallel LLM calls per document
+
     # Retry settings
     MAX_RETRIES: int = 3
     RETRY_DELAY: int = 1

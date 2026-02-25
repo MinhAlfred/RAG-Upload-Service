@@ -10,6 +10,7 @@ import hashlib
 from config.config import settings
 from services.document_processor import DocumentProcessor
 from services.embedder import OpenAIEmbedder
+from services.llm_enricher import LLMEnricher
 
 logger = logging.getLogger(__name__)
 
@@ -21,8 +22,18 @@ class EmbeddingService:
         """Initialize embedding service with OpenAI"""
         self.document_processor = DocumentProcessor()
         self.embedder = OpenAIEmbedder(api_key=settings.OPENAI_API_KEY)
+        self.llm_enricher = LLMEnricher(
+            api_key=settings.OPENAI_API_KEY,
+            model=settings.LLM_ENRICHMENT_MODEL,
+            max_concurrency=settings.LLM_ENRICHMENT_CONCURRENCY,
+            enabled=settings.LLM_ENRICHMENT_ENABLED,
+        )
         self.executor = ThreadPoolExecutor(max_workers=4)
-        logger.info("Initialized EmbeddingService with OpenAI text-embedding-3-small")
+        logger.info(
+            f"Initialized EmbeddingService | embedder=text-embedding-3-small "
+            f"| LLM enrichment={'ON' if settings.LLM_ENRICHMENT_ENABLED else 'OFF'} "
+            f"({settings.LLM_ENRICHMENT_MODEL})"
+        )
 
     async def process_textbook_document(
         self,
@@ -85,17 +96,31 @@ class EmbeddingService:
 
                 logger.info(f"Created {len(chunks_with_pages)} chunks with page information")
 
-                # Extract just the text for embedding
-                chunks = [chunk["text"] for chunk in chunks_with_pages]
+                # ── LLM Contextual Enrichment ──────────────────────────────
+                # Each chunk gains a structured header (chapter, section,
+                # content_type, topics, summary) prepended to its text so
+                # the embedding captures both structure AND content.
+                chunks_with_pages = await self.llm_enricher.enrich_chunks(
+                    chunks_with_pages=chunks_with_pages,
+                    book_name=book_metadata["book_name"],
+                    publisher=book_metadata["publisher"],
+                    grade=book_metadata["grade"],
+                )
+
+                # Use contextual_text (header + chunk) for embedding
+                chunks_to_embed = [c["contextual_text"] for c in chunks_with_pages]
+                # Keep original raw text for storage / display
+                chunks = [c["text"] for c in chunks_with_pages]
 
                 # Generate embeddings using OpenAI
-                embeddings = await self.embed_batch(chunks)
+                embeddings = await self.embed_batch(chunks_to_embed)
 
                 # Prepare enhanced metadata for each chunk
                 file_hash = hashlib.md5(file_content).hexdigest()
                 metadata_list = []
 
                 for idx, chunk_info in enumerate(chunks_with_pages):
+                    llm_meta = chunk_info.get("llm_metadata", {})
                     meta = {
                         "filename": filename,
                         "file_type": file_type,
@@ -113,12 +138,22 @@ class EmbeddingService:
                         "pages": chunk_info["pages"],
                         "page_range": f"{min(chunk_info['pages'])}-{max(chunk_info['pages'])}" if len(chunk_info['pages']) > 1 else f"Trang {chunk_info['pages'][0]}" if chunk_info['pages'] else "",
                         "char_start": chunk_info["char_start"],
-                        "char_end": chunk_info["char_end"]
+                        "char_end": chunk_info["char_end"],
+                        # LLM-extracted structural metadata (CS-specific)
+                        "chapter": llm_meta.get("chapter", ""),
+                        "section": llm_meta.get("section", ""),
+                        "content_type": llm_meta.get("content_type", "other"),
+                        "cs_domain": llm_meta.get("cs_domain", "other"),
+                        "programming_language": llm_meta.get("programming_language", ""),
+                        "topics": llm_meta.get("topics", []),
+                        "chunk_summary": llm_meta.get("summary", ""),
+                        "llm_enriched": bool(llm_meta.get("chapter") or llm_meta.get("section") or llm_meta.get("summary")),
                     }
                     metadata_list.append(meta)
 
                 return {
                     "chunks": chunks,
+                    "chunks_to_embed": chunks_to_embed,
                     "embeddings": embeddings,
                     "metadata": metadata_list,
                     "original_text": extracted_text,
