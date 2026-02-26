@@ -14,6 +14,7 @@ from services.qdrant_service import QdrantService
 from model.schemas import (
     DocumentResponse,
     ExtractResponse,
+    ExtractBatchResponse,
     SearchRequest,
     SearchResponse,
     HealthResponse
@@ -154,6 +155,76 @@ async def extract_text(
     except Exception as e:
         logger.error(f"Error extracting text: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Text extraction failed: {str(e)}")
+
+
+@app.post("/extract-batch", response_model=ExtractBatchResponse)
+async def extract_text_batch(
+        files: List[UploadFile] = File(...),
+):
+    """
+    Extract text from multiple files at once (for chat user)
+    Does NOT save to vector database - just returns extracted text for each file
+
+    Use case: Spring backend sends multiple user-uploaded files to extract text for chat context
+    """
+    results = []
+    success_count = 0
+    failed_count = 0
+
+    for file in files:
+        try:
+            logger.info(f"Extracting text from: {file.filename} (type: {file.content_type})")
+
+            if not file.filename:
+                raise ValueError("Invalid file")
+
+            content = await file.read()
+
+            file_size_mb = len(content) / (1024 * 1024)
+            if file_size_mb > settings.MAX_FILE_SIZE_MB:
+                raise ValueError(
+                    f"File size {file_size_mb:.2f}MB exceeds limit of {settings.MAX_FILE_SIZE_MB}MB"
+                )
+
+            extracted_text = await embedding_service._extract_text(
+                file_content=content,
+                filename=file.filename,
+                file_type=file.content_type
+            )
+
+            if not extracted_text or not extracted_text.strip():
+                raise ValueError("No text could be extracted from the file")
+
+            logger.info(f"Extracted {len(extracted_text)} characters from {file.filename}")
+
+            results.append(ExtractResponse(
+                text=extracted_text,
+                filename=file.filename,
+                file_type=file.content_type or "",
+                char_count=len(extracted_text),
+                status="success",
+                message=f"Successfully extracted {len(extracted_text)} characters"
+            ))
+            success_count += 1
+
+        except Exception as e:
+            logger.error(f"Error extracting text from {file.filename}: {e}", exc_info=True)
+            results.append(ExtractResponse(
+                text="",
+                filename=file.filename or "unknown",
+                file_type=file.content_type or "",
+                char_count=0,
+                status="failed",
+                message=str(e)
+            ))
+            failed_count += 1
+
+    return ExtractBatchResponse(
+        results=results,
+        total_files=len(files),
+        success_count=success_count,
+        failed_count=failed_count
+    )
 
 
 @app.post("/upload-document", response_model=DocumentResponse)

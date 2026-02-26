@@ -26,6 +26,14 @@ class ExtractResponse(BaseModel):
     message: Optional[str] = None
 
 
+class ExtractBatchResponse(BaseModel):
+    """Response model for batch text extraction"""
+    results: List[ExtractResponse]
+    total_files: int
+    success_count: int
+    failed_count: int
+
+
 class SearchResult(BaseModel):
     """Individual search result"""
     id: str
