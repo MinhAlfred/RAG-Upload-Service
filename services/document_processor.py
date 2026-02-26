@@ -5,6 +5,7 @@ import logging
 from typing import List, Dict, Tuple
 import io
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from PIL import Image
 import fitz  # PyMuPDF
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -40,62 +41,100 @@ class DocumentProcessor:
 
     def extract_from_pdf_with_pages(self, file_content: bytes) -> Tuple[str, List[Dict]]:
         """
-        Extract text from PDF and return text with page information
+        Extract text from PDF and return text with page information.
+
+        Pass 1 (single thread): iterate pages with PyMuPDF to collect direct text
+                                or rendered image bytes – fitz.Document is NOT thread-safe.
+        Pass 2 (thread pool):   run Tesseract OCR on all scanned pages in parallel.
+
         Returns: (full_text, page_info_list)
         """
         try:
             pdf_stream = io.BytesIO(file_content)
             doc = fitz.open(stream=pdf_stream, filetype="pdf")
-
-            full_text = []
-            page_info = []
             total_pages = len(doc)
-            scanned_pages = 0
-            text_pages = 0
-
             logger.info(f"Processing PDF with {total_pages} pages")
 
+            # ------------------------------------------------------------------
+            # Pass 1: collect page data without OCR (single thread – fitz safety)
+            # ------------------------------------------------------------------
+            page_data: List[Dict] = []  # per-page: {text, img_bytes, needs_ocr}
             for page_num in range(total_pages):
                 page = doc[page_num]
-
-                # Try to extract text directly
                 text = page.get_text()
+                garbled = self._is_text_garbled(text)
+                needs_ocr = len(text.strip()) < 50 or garbled
 
-                # If no text, very little text, or garbled (encoding issue) → use OCR
-                if len(text.strip()) < 50 or self._is_text_garbled(text):
-                    if len(text.strip()) >= 50:
-                        logger.info(f"Page {page_num + 1}/{total_pages}: Text garbled/wrong encoding, falling back to OCR")
-                    else:
-                        logger.info(f"Page {page_num + 1}/{total_pages}: Scanned page detected, using OCR")
-                    scanned_pages += 1
-
-                    # Convert page to image and OCR
-                    pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 2x zoom for better OCR
-                    img_data = pix.tobytes("png")
-
-                    # OCR the image
-                    ocr_text = self.extract_from_image(img_data)
-                    page_text = ocr_text
-                    logger.info(f"Page {page_num + 1}/{total_pages}: OCR extracted {len(ocr_text)} chars")
+                if needs_ocr:
+                    reason = "garbled encoding" if garbled and len(text.strip()) >= 50 else "scanned"
+                    logger.info(f"Page {page_num + 1}/{total_pages}: {reason} → queued for OCR")
+                    pix = page.get_pixmap(matrix=fitz.Matrix(2, 2)) # zoom 2x for better OCR accuracy
+                    img_bytes = pix.tobytes("png")
                 else:
-                    text_pages += 1
-                    page_text = text
-                    logger.info(f"Page {page_num + 1}/{total_pages}: Text extracted {len(text)} chars")
+                    logger.info(f"Page {page_num + 1}/{total_pages}: text extracted {len(text)} chars")
+                    img_bytes = None
 
-                full_text.append(page_text)
-                page_info.append({
-                    "page_number": page_num + 1,
-                    "text": page_text,
-                    "char_start": sum(len(t) + 2 for t in full_text[:-1]),  # +2 for \n\n
-                    "char_end": sum(len(t) + 2 for t in full_text[:-1]) + len(page_text),
-                    "ocr_used": len(text.strip()) < 50
+                page_data.append({
+                    "page_num": page_num,
+                    "direct_text": text if not needs_ocr else "",
+                    "img_bytes": img_bytes,
+                    "needs_ocr": needs_ocr,
                 })
 
             doc.close()
 
+            # ------------------------------------------------------------------
+            # Pass 2: parallel OCR for scanned pages
+            # ------------------------------------------------------------------
+            ocr_indices = [i for i, p in enumerate(page_data) if p["needs_ocr"]]
+            ocr_results: Dict[int, str] = {}
+
+            if ocr_indices:
+                # Use up to 4 workers; Tesseract is CPU-bound but each call uses 1 core
+                max_workers = min(4, len(ocr_indices))
+                logger.info(f"Running OCR on {len(ocr_indices)} pages with {max_workers} workers in parallel")
+
+                with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                    future_to_idx = {
+                        pool.submit(self.extract_from_image, page_data[i]["img_bytes"]): i
+                        for i in ocr_indices
+                    }
+                    for future in as_completed(future_to_idx):
+                        idx = future_to_idx[future]
+                        try:
+                            ocr_results[idx] = future.result()
+                            logger.info(
+                                f"Page {page_data[idx]['page_num'] + 1}/{total_pages}: "
+                                f"OCR extracted {len(ocr_results[idx])} chars"
+                            )
+                        except Exception as exc:
+                            logger.error(f"OCR failed for page {page_data[idx]['page_num'] + 1}: {exc}")
+                            ocr_results[idx] = ""
+
+            # ------------------------------------------------------------------
+            # Assemble results in original page order
+            # ------------------------------------------------------------------
+            full_text = []
+            page_info = []
+            scanned_pages = sum(1 for p in page_data if p["needs_ocr"])
+            text_pages = total_pages - scanned_pages
+
+            for i, p in enumerate(page_data):
+                page_text = ocr_results[i] if p["needs_ocr"] else p["direct_text"]
+                full_text.append(page_text)
+                page_info.append({
+                    "page_number": p["page_num"] + 1,
+                    "text": page_text,
+                    "char_start": sum(len(t) + 2 for t in full_text[:-1]),
+                    "char_end": sum(len(t) + 2 for t in full_text[:-1]) + len(page_text),
+                    "ocr_used": p["needs_ocr"],
+                })
+
             result = "\n\n".join(full_text)
-            logger.info(f"PDF processed: {text_pages} text pages, {scanned_pages} scanned pages, total {len(result)} chars")
-            
+            logger.info(
+                f"PDF processed: {text_pages} text pages, {scanned_pages} scanned pages, "
+                f"total {len(result)} chars"
+            )
             return result, page_info
 
         except Exception as e:
