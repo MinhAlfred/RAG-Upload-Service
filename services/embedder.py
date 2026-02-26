@@ -6,8 +6,12 @@ import logging
 from typing import List
 import asyncio
 from openai import AsyncOpenAI
+import tiktoken
 
 logger = logging.getLogger(__name__)
+
+# text-embedding-3-small uses cl100k_base tokenizer; max input is 8192 tokens
+_MAX_TOKENS = 8191
 
 
 class OpenAIEmbedder:
@@ -26,8 +30,21 @@ class OpenAIEmbedder:
         self.client = AsyncOpenAI(api_key=api_key)
         self.model = "text-embedding-3-small"
         self.dimension = 1536
+        self._tokenizer = tiktoken.get_encoding("cl100k_base")
 
         logger.info(f"Initialized OpenAI embedder: {self.model} ({self.dimension}D)")
+
+    def _truncate_to_token_limit(self, text: str) -> str:
+        """Truncate text so it does not exceed _MAX_TOKENS tokens."""
+        tokens = self._tokenizer.encode(text)
+        if len(tokens) <= _MAX_TOKENS:
+            return text
+        truncated = self._tokenizer.decode(tokens[:_MAX_TOKENS])
+        logger.warning(
+            f"Chunk truncated from {len(tokens)} tokens to {_MAX_TOKENS} tokens "
+            f"(was {len(text)} chars, now {len(truncated)} chars)"
+        )
+        return truncated
 
     async def embed(self, texts: List[str]) -> List[List[float]]:
         """
@@ -49,7 +66,7 @@ class OpenAIEmbedder:
             all_embeddings = []
 
             for i in range(0, len(texts), batch_size):
-                batch = texts[i:i + batch_size]
+                batch = [self._truncate_to_token_limit(t) for t in texts[i:i + batch_size]]
 
                 response = await self.client.embeddings.create(
                     input=batch,

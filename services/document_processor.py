@@ -8,11 +8,19 @@ import re
 from PIL import Image
 import fitz  # PyMuPDF
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+import tiktoken
 
 from config.config import settings
 from services.ocr_service import OCRService
 
 logger = logging.getLogger(__name__)
+
+# Use the same tokenizer as the embedding model to measure chunk size in tokens
+_TOKENIZER = tiktoken.get_encoding("cl100k_base")
+
+
+def _token_len(text: str) -> int:
+    return len(_TOKENIZER.encode(text))
 
 
 class DocumentProcessor:
@@ -27,7 +35,7 @@ class DocumentProcessor:
             chunk_size=settings.CHUNK_SIZE,
             chunk_overlap=settings.CHUNK_OVERLAP,
             separators=["\n\n", "\n", ". ", " ", ""],
-            length_function=len
+            length_function=_token_len
         )
 
     def extract_from_pdf_with_pages(self, file_content: bytes) -> Tuple[str, List[Dict]]:
@@ -207,7 +215,7 @@ class DocumentProcessor:
                     chunk_size=chunk_size or settings.CHUNK_SIZE,
                     chunk_overlap=chunk_overlap or settings.CHUNK_OVERLAP,
                     separators=["\n\n", "\n", ". ", " ", ""],
-                    length_function=len
+                    length_function=_token_len
                 )
             else:
                 splitter = self.text_splitter
@@ -260,7 +268,7 @@ class DocumentProcessor:
                     chunk_size=chunk_size or settings.CHUNK_SIZE,
                     chunk_overlap=chunk_overlap or settings.CHUNK_OVERLAP,
                     separators=["\n\n", "\n", ". ", " ", ""],
-                    length_function=len
+                    length_function=_token_len
                 )
             else:
                 splitter = self.text_splitter

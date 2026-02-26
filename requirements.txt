@@ -17,6 +17,7 @@ qdrant-client==1.16.2
 
 # Embedding Provider
 openai==2.17.0
+tiktoken>=0.7.0
 
 # Document Processing
 PyMuPDF==1.26.7

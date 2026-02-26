@@ -28,9 +28,10 @@ class Settings(BaseSettings):
     EMBEDDING_MODEL: str = "text-embedding-3-small"
     EMBEDDING_DIMENSION: int = 1536  # text-embedding-3-small dimension
 
-    # Document processing
-    CHUNK_SIZE: int = 800
-    CHUNK_OVERLAP: int = 150
+    # Document processing (sizes are in TOKENS, not characters)
+    # For textbook content: 600 tokens ≈ 2 400 chars (~1-2 paragraphs), safe under the 8 192-token limit
+    CHUNK_SIZE: int = 600
+    CHUNK_OVERLAP: int = 100
     MAX_FILE_SIZE_MB: int = 100
     SUPPORTED_FILE_TYPES: List[str] = [
         "application/pdf",
