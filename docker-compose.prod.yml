@@ -74,6 +74,6 @@ volumes:
     driver: local
 
 networks:
-  app-network:
+  ocr-network:
     external: true
     name: bitlearning-network
