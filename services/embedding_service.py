@@ -59,7 +59,7 @@ class EmbeddingService:
                 "book_name": book_name.strip(),
                 "publisher": publisher.strip(),
                 "grade": grade.strip() if grade else None,
-                "full_name": f"{book_name.strip()} - {publisher.strip()}" + (f" - {grade.strip()}" if grade else "")
+                "full_name": f"{book_name.strip()} - {publisher.strip()}" + (f" - Lớp {grade.strip()}" if grade and grade.strip() else "")
             }
 
             # Extract text with page information (only for PDF currently)
