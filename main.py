@@ -4,6 +4,7 @@ Main FastAPI application for document embedding service
 from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Form
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
+import asyncio
 import hashlib
 import logging
 from contextlib import asynccontextmanager
@@ -48,11 +49,24 @@ async def lifespan(app: FastAPI):
             api_key=settings.QDRANT_API_KEY
         )
 
-        # Initialize collection
-        await qdrant_service.init_collection(
-            collection_name=settings.COLLECTION_NAME,
-            vector_size=settings.EMBEDDING_DIMENSION
-        )
+        # Initialize collection (retry for transient DNS/network errors on Windows)
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            try:
+                await qdrant_service.init_collection(
+                    collection_name=settings.COLLECTION_NAME,
+                    vector_size=settings.EMBEDDING_DIMENSION
+                )
+                break
+            except Exception as init_err:
+                if attempt < max_retries:
+                    logger.warning(
+                        f"init_collection attempt {attempt}/{max_retries} failed: {init_err}. "
+                        f"Retrying in 2s..."
+                    )
+                    await asyncio.sleep(2)
+                else:
+                    raise
 
         logger.info("Services initialized successfully")
         yield
