@@ -10,6 +10,7 @@ import hashlib
 from config.config import settings
 from services.document_processor import DocumentProcessor
 from services.embedder import OpenAIEmbedder
+from services.textbook_chunker import TextbookChunker
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,10 @@ class EmbeddingService:
         """Initialize embedding service with OpenAI"""
         self.document_processor = DocumentProcessor()
         self.embedder = OpenAIEmbedder(api_key=settings.OPENAI_API_KEY)
+        self.textbook_chunker = TextbookChunker(
+            max_chunk_tokens=settings.CHUNK_SIZE,
+            min_chunk_tokens=80,
+        )
         self.executor = ThreadPoolExecutor(max_workers=4)
         logger.info("Initialized EmbeddingService with OpenAI text-embedding-3-small")
 
@@ -75,50 +80,64 @@ class EmbeddingService:
 
                 logger.info(f"Extracted {len(extracted_text)} characters from {len(page_info)} pages")
 
-                # Chunk the text with page information
-                chunks_with_pages = self.document_processor.chunk_text_with_pages(
+                # ── Semantic chunking (structure-aware) ──
+                # Detect Chuong/Bai/Muc headings, split at sentence
+                # boundaries instead of fixed token windows.
+                chunks_with_meta = self.textbook_chunker.chunk(
                     text=extracted_text,
                     page_info=page_info,
-                    chunk_size=settings.CHUNK_SIZE,
-                    chunk_overlap=settings.CHUNK_OVERLAP
                 )
 
-                logger.info(f"Created {len(chunks_with_pages)} chunks with page information")
+                logger.info(f"Created {len(chunks_with_meta)} semantic chunks")
 
-                # Extract just the text for embedding
-                chunks = [chunk["text"] for chunk in chunks_with_pages]
+                # Embed the *prefixed* text (includes heading context
+                # like "[Chuong 1 > Bai 2 > I. Khai niem]") for better
+                # retrieval accuracy.
+                texts_for_embedding = [c["text"] for c in chunks_with_meta]
+                embeddings = await self.embed_batch(texts_for_embedding)
 
-                # Generate embeddings using OpenAI
-                embeddings = await self.embed_batch(chunks)
+                # Store the *raw* text (no bracket prefix) so the
+                # chatbot gets clean content for LLM context.
+                texts_for_storage = [c["raw_text"] for c in chunks_with_meta]
 
-                # Prepare enhanced metadata for each chunk
+                # ── Build enriched metadata ──
                 file_hash = hashlib.md5(file_content).hexdigest()
                 metadata_list = []
 
-                for idx, chunk_info in enumerate(chunks_with_pages):
+                for idx, chunk_info in enumerate(chunks_with_meta):
+                    pages = chunk_info["pages"]
                     meta = {
                         "filename": filename,
                         "file_type": file_type,
                         "file_hash": file_hash,
                         "chunk_index": idx,
-                        "total_chunks": len(chunks_with_pages),
-                        # Product name from API input
+                        "total_chunks": len(chunks_with_meta),
+                        # Product / book info
                         "product_name": product_name or book_metadata["full_name"],
-                        # Textbook specific metadata
                         "book_name": book_metadata["book_name"],
                         "publisher": book_metadata["publisher"],
                         "grade": book_metadata["grade"],
                         "book_full_name": book_metadata["full_name"],
-                        # Page information
-                        "pages": chunk_info["pages"],
-                        "page_range": f"{min(chunk_info['pages'])}-{max(chunk_info['pages'])}" if len(chunk_info['pages']) > 1 else f"Trang {chunk_info['pages'][0]}" if chunk_info['pages'] else "",
+                        # ── Structure metadata (NEW) ──
+                        "chapter": chunk_info["chapter"],
+                        "lesson": chunk_info["lesson"],
+                        "section": chunk_info["section"],
+                        "content_type": chunk_info["content_type"],
+                        "heading_path": chunk_info["heading_path"],
+                        # Page info
+                        "pages": pages,
+                        "page_range": (
+                            f"{min(pages)}-{max(pages)}" if len(pages) > 1
+                            else f"Trang {pages[0]}" if pages
+                            else ""
+                        ),
                         "char_start": chunk_info["char_start"],
-                        "char_end": chunk_info["char_end"]
+                        "char_end": chunk_info["char_end"],
                     }
                     metadata_list.append(meta)
 
                 return {
-                    "chunks": chunks,
+                    "chunks": texts_for_storage,
                     "embeddings": embeddings,
                     "metadata": metadata_list,
                     "original_text": extracted_text,
