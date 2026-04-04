@@ -11,6 +11,7 @@ from config.config import settings
 from services.document_processor import DocumentProcessor
 from services.embedder import OpenAIEmbedder
 from services.textbook_chunker import TextbookChunker
+from services.ocr_corrector import OCRCorrector
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,7 @@ class EmbeddingService:
             max_chunk_tokens=settings.CHUNK_SIZE,
             min_chunk_tokens=80,
         )
+        self.ocr_corrector = OCRCorrector(api_key=settings.OPENAI_API_KEY)
         self.executor = ThreadPoolExecutor(max_workers=4)
         logger.info("Initialized EmbeddingService with OpenAI text-embedding-3-small")
 
@@ -79,6 +81,14 @@ class EmbeddingService:
                     raise ValueError("No text could be extracted from the document")
 
                 logger.info(f"Extracted {len(extracted_text)} characters from {len(page_info)} pages")
+
+                # ── Post-OCR correction (LLM) ──
+                # Only corrects pages where ocr_used=True.
+                # Text-extracted pages are left untouched.
+                extracted_text, page_info = await self.ocr_corrector.correct_pages(
+                    full_text=extracted_text,
+                    page_info=page_info,
+                )
 
                 # ── Semantic chunking (structure-aware) ──
                 # Detect Chuong/Bai/Muc headings, split at sentence
