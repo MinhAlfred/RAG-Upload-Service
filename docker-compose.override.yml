@@ -1,8 +1,6 @@
 # Docker Compose override for development
 # This file is automatically used when running docker-compose in development
 
-version: '3.8'
-
 services:
   ocr-embedding-service:
     # Enable development mode

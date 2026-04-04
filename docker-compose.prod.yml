@@ -1,5 +1,4 @@
 # Production Docker Compose Configuration
-version: '3.8'
 
 services:
   ocr-embedding-service:
