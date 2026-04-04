@@ -354,19 +354,14 @@ async def upload_textbook(
 ):
     """
     Upload and process a textbook document with enhanced metadata
-    
+
     Args:
         file: The textbook file to upload
         book_name: Name of the book (required)
         publisher: Publisher name (required)
         grade: Grade level (optional)
         product_name: Optional custom name for the textbook (overrides generated name)
-    
-    Supports enhanced features for textbook files:
-    - Tracks page numbers for each chunk
-    - Includes subject, publisher, grade information
-    - Allows custom product name override
-    
+
     Use case: Upload textbooks for students with metadata information
     """
     try:

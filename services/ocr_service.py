@@ -104,8 +104,7 @@ class OCRService:
             img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             pil_image = Image.fromarray(img_rgb)
             
-            # Tesseract config for better accuracy
-            custom_config = r'--oem 3 --psm 6'
+            custom_config = r'--oem 3 --psm 3'
             
             # Perform OCR
             text = pytesseract.image_to_string(

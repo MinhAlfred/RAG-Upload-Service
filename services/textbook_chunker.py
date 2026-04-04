@@ -37,25 +37,23 @@ def _token_len(text: str) -> int:
 # Each rule: (compiled regex, level_name, depth_int)
 
 _HEADING_RULES: List[Tuple[re.Pattern, str, int]] = [
-    # ── Chuong (Chapter) — with and without diacritics (OCR fallback) ──
+    # ── Chuong / Chu de (Chapter / Topic) — with and without diacritics ──
     (re.compile(
         r'^(?:CHƯƠNG|Chương|CHU\u01A0NG|CHUONG|Chuong)\s+(\d+|[IVXLC]+)[.:\-–\s]\s*(.+)',
+    ), 'chapter', 1),
+    (re.compile(
+        r'^(?:CHỦ ĐỀ|Chủ đề|CHU DE|Chu de)\s+(\d+|[IVXLC]+)[.:\-–\s]\s*(.+)',
+        re.IGNORECASE,
     ), 'chapter', 1),
 
     # ── Bai (Lesson) / § — with and without diacritics ──
     (re.compile(
-        r'^(?:BÀI|Bài|BAI|Bai)\s+(\d+)[.:\-–\s]\s*(.+)',
+        r'^(?:BÀI|Bài|BAI|Bai)\s+(\d+[a-zA-Z]?)[.:\-–\s]\s*(.+)',
     ), 'lesson', 2),
     (re.compile(r'^§\s*(\d+)[.:\-–\s]\s*(.+)'), 'lesson', 2),
 
-    # ── Muc: Roman numerals (I. II. III. IV. ...) ──
-    (re.compile(r'^([IVXLC]{1,4})\.\s+(.{3,})'), 'section', 3),
-
-    # ── Tieu muc: "1. Title..." (number + title >= 10 chars total) ──
-    # Requires letter after the number to avoid matching list items like "1. x=5"
-    (re.compile(
-        r'^(\d{1,2})\.\s+([A-Za-z\u00C0-\u1EF9\u0110\u0111].{8,})'
-    ), 'subsection', 4),
+    # section / subsection removed — Roman numerals and numbered headings
+    # cause too many false positives with OCR'd Vietnamese textbook content.
 ]
 
 
@@ -218,22 +216,6 @@ class TextbookChunker:
         Returns
         -------
         list[dict]
-            Each dict contains:
-
-            ======== ======================================================
-            Key      Description
-            ======== ======================================================
-            text         chunk WITH heading prefix (for **embedding**)
-            raw_text     chunk WITHOUT prefix (for **storage / display**)
-            chapter      e.g. ``"Chuong 2: Phan mem may tinh"``
-            lesson       e.g. ``"Bai 5: Ngon ngu lap trinh"``
-            section      e.g. ``"I. Khai niem lap trinh"``
-            content_type definition | example | exercise | practice | ...
-            heading_path breadcrumb ``"Chuong 2 > Bai 5 > I. Khai niem"``
-            pages        ``[3, 4]``  page numbers this chunk spans
-            char_start   start offset in the original *text*
-            char_end     end offset in the original *text*
-            ======== ======================================================
         """
         # 1. Parse structural sections
         sections = self._parse_sections(text)
@@ -257,7 +239,60 @@ class TextbookChunker:
             f"TextbookChunker: {len(sections)} sections -> {len(chunks)} chunks "
             f"(max {self.max_tokens} tok)"
         )
+
+        # ── Debug: log all final chunks ──
+        for idx, c in enumerate(chunks):
+            tok = _token_len(c['text'])
+            logger.debug(
+                f"  chunk[{idx}] tokens={tok}, "
+                f"type={c['content_type']}, "
+                f"path={c['heading_path']!r}, "
+                f"pages={c.get('pages', [])}, "
+                f"preview={c['raw_text'][:80]!r}"
+            )
+
         return chunks
+
+    # ─── TOC detection ───────────────────────────────────────────────
+
+    @staticmethod
+    def _find_toc_end_line(lines: List[str]) -> int:
+        """
+        Detect a Table of Contents region and return the line index of
+        its last line, or ``-1`` if no TOC is found.
+
+        A TOC is a dense cluster of heading matches packed into a small
+        region of the text.  Body headings, by contrast, are separated
+        by pages of content.
+
+        Algorithm:
+          1. Collect all line indices where ``_match_heading`` fires.
+          2. Walk through them looking for the first large gap (> 30 lines).
+             Everything before the gap with ≥ 4 headings is the TOC.
+          3. Fallback: if ALL headings sit in < 10% of total lines, the
+             whole set is treated as a TOC.
+        """
+        heading_lines = [
+            i for i, line in enumerate(lines)
+            if _match_heading(line.strip())
+        ]
+
+        if len(heading_lines) < 4:
+            return -1
+
+        # Find first big gap — headings before it are the TOC
+        for j in range(1, len(heading_lines)):
+            gap = heading_lines[j] - heading_lines[j - 1]
+            if gap > 30 and j >= 4:
+                return heading_lines[j - 1]
+
+        # Fallback: all headings in a tiny region → entire cluster is TOC
+        total_lines = len(lines)
+        span = heading_lines[-1] - heading_lines[0] + 1
+        if span < total_lines * 0.10:
+            return heading_lines[-1]
+
+        return -1
 
     # ─── Section parsing ──────────────────────────────────────────────
 
@@ -265,6 +300,11 @@ class TextbookChunker:
         """
         Walk through lines, detect headings, and group consecutive lines
         into hierarchical sections.
+
+        Character positions are tracked by scanning through the original
+        *text* string so that they match the ``char_start`` / ``char_end``
+        values produced by the PDF extractor (which joins pages with
+        ``\\n\\n``).
         """
         lines = text.split('\n')
         sections: List[Dict] = []
@@ -278,10 +318,14 @@ class TextbookChunker:
         buf_heading: str = ''
         buf_level: str = 'content'
 
+        # Track real character offset in the original text.
+        # After split('\n'), the offset of line[i] in the original text is
+        # sum(len(line[0..i-1])) + i   (each split consumed one '\n').
         char_pos = 0
 
-        for line in lines:
+        for i, line in enumerate(lines):
             stripped = line.strip()
+
             heading = _match_heading(stripped)
 
             if heading:
@@ -293,13 +337,15 @@ class TextbookChunker:
 
                 # ── update hierarchy ──
                 level, _number, _title, _depth = heading
+                logger.info(
+                    f"[HeadingDetect] level={level}, number={_number}, "
+                    f"title={_title!r}, line={i+1}"
+                )
                 if level == 'chapter':
                     ctx = {'chapter': stripped, 'lesson': '', 'section': ''}
                 elif level == 'lesson':
                     ctx['lesson'] = stripped
                     ctx['section'] = ''
-                elif level in ('section', 'subsection'):
-                    ctx['section'] = stripped
 
                 # ── start new section ──
                 buf_lines = [stripped]
@@ -309,13 +355,46 @@ class TextbookChunker:
             else:
                 buf_lines.append(line)
 
-            char_pos += len(line) + 1  # +1 accounts for the '\n'
+            # Advance by the length of this line + 1 for the '\n' that
+            # split() consumed.  This keeps char_pos aligned with the
+            # original text even when pages are joined by '\n\n'.
+            char_pos += len(line)
+            if i < len(lines) - 1:
+                char_pos += 1  # the '\n' between this line and the next
 
         # Flush the last section
         self._flush_section(
             buf_lines, buf_start, char_pos,
             buf_heading, buf_level, ctx, sections,
         )
+
+        # ── Debug: log lines that ALMOST look like headings but didn't match ──
+        _NEAR_MISS = re.compile(
+            r'(?:chương|chủ\s*đề|bài|chu\s*de|chuong)\s+\d',
+            re.IGNORECASE,
+        )
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if _NEAR_MISS.search(stripped) and not _match_heading(stripped):
+                logger.debug(
+                    f"[NearMiss] line={i+1}, len={len(stripped)}, "
+                    f"text={stripped[:150]!r}"
+                )
+
+        # ── Debug: log all detected sections ──
+        logger.info(f"[SectionSummary] Total sections detected: {len(sections)}")
+        for idx, sec in enumerate(sections):
+            logger.info(
+                f"  [{idx}] level={sec['level']}, "
+                f"content_type={sec['content_type']}, "
+                f"chapter={sec['chapter']!r}, "
+                f"lesson={sec['lesson']!r}, "
+                f"heading={sec['heading']!r}, "
+                f"path={sec['heading_path']!r}, "
+                f"chars={sec['char_start']}-{sec['char_end']} "
+                f"(~{sec['char_end'] - sec['char_start']} chars)"
+            )
+
         return sections
 
     @staticmethod
@@ -346,6 +425,178 @@ class TextbookChunker:
             'char_start': buf_start,
             'char_end': char_pos,
         })
+
+    # ─── TOC-aware rebuild ───────────────────────────────────────────
+
+    _PAGE_NUM_RE = re.compile(r'^(.+?)\s+(\d+)\s*$')
+
+    def _rebuild_from_toc(
+        self,
+        sections: List[Dict],
+        text: str,
+        page_info: List[Dict],
+    ) -> List[Dict]:
+        """
+        Detect if headings came from the Table of Contents instead of
+        actual body headings.  If so, use TOC page numbers + page_info
+        to create properly mapped sections.
+
+        The offset between book page numbers and PDF page numbers is
+        auto-detected by searching for a TOC entry title in the body text.
+        """
+        if not page_info:
+            return sections
+
+        heading_secs = [s for s in sections if s['level'] != 'content']
+        if len(heading_secs) < 3:
+            return sections
+
+        # ── Detect TOC pattern ──────────────────────────────────────
+        sizes = sorted(s['char_end'] - s['char_start'] for s in heading_secs)
+        median_size = sizes[len(sizes) // 2]
+        max_size = sizes[-1]
+
+        if median_size >= 200 or max_size < 5000:
+            return sections  # sections have real content → not TOC
+
+        # ── Extract TOC entries ─────────────────────────────────────
+        toc_entries: List[Dict] = []
+        for s in heading_secs:
+            m = self._PAGE_NUM_RE.match(s['heading'])
+            if m:
+                toc_entries.append({
+                    'heading': m.group(1).strip(),
+                    'page': int(m.group(2)),
+                    'level': s['level'],
+                })
+            else:
+                toc_entries.append({
+                    'heading': s['heading'].strip(),
+                    'page': None,
+                    'level': s['level'],
+                })
+
+        with_pages = [e for e in toc_entries if e['page'] is not None]
+        if len(with_pages) < len(toc_entries) * 0.5:
+            return sections
+
+        # ── Auto-detect page offset (book page → PDF page) ─────────
+        # Strategy: search for each TOC entry title in the body text,
+        # find which PDF page the match is on, compute offset.
+        toc_body_start = max(s['char_end'] for s in heading_secs)
+        page_starts = {p['page_number']: p['char_start'] for p in page_info}
+        page_ends = {p['page_number']: p.get('char_end', len(text)) for p in page_info}
+
+        offset: Optional[int] = None
+        for entry in with_pages:
+            pos = text.find(entry['heading'], int(toc_body_start))
+            if pos < 0:
+                continue
+            for p in page_info:
+                if p['char_start'] <= pos < p.get('char_end', len(text)):
+                    offset = p['page_number'] - entry['page']
+                    logger.info(
+                        f"[TOC Offset] Found '{entry['heading'][:50]}' "
+                        f"on PDF page {p['page_number']} "
+                        f"(TOC says page {entry['page']}). "
+                        f"Offset = {offset}"
+                    )
+                    break
+            if offset is not None:
+                break
+
+        if offset is None:
+            # Fallback: first PDF page after TOC = first TOC page
+            min_toc_page = min(e['page'] for e in with_pages)
+            for p in sorted(page_info, key=lambda x: x['char_start']):
+                if p['char_start'] >= toc_body_start:
+                    offset = p['page_number'] - min_toc_page
+                    logger.info(
+                        f"[TOC Offset] Estimated offset = {offset} "
+                        f"(PDF page {p['page_number']} ≈ book page {min_toc_page})"
+                    )
+                    break
+            if offset is None:
+                offset = 0
+
+        logger.info(
+            f"[TOC Detected] {len(toc_entries)} entries, offset={offset}"
+        )
+
+        # ── Build new sections ──────────────────────────────────────
+        ctx: Dict[str, str] = {'chapter': '', 'lesson': '', 'section': ''}
+        new_sections: List[Dict] = []
+
+        for i, entry in enumerate(toc_entries):
+            # Always update hierarchy context
+            if entry['level'] == 'chapter':
+                ctx = {'chapter': entry['heading'], 'lesson': '', 'section': ''}
+            elif entry['level'] == 'lesson':
+                ctx['lesson'] = entry['heading']
+                ctx['section'] = ''
+
+            if entry['page'] is None:
+                continue
+
+            pdf_page = entry['page'] + offset
+            if pdf_page not in page_starts:
+                continue
+
+            start = page_starts[pdf_page]
+
+            # End = char_start of next entry with a later PDF page
+            end = len(text)
+            for j in range(i + 1, len(toc_entries)):
+                np = toc_entries[j].get('page')
+                if np is not None:
+                    next_pdf = np + offset
+                    if next_pdf in page_starts and page_starts[next_pdf] > start:
+                        end = page_starts[next_pdf]
+                        break
+
+            # Chapter shares page with first lesson → skip chapter section
+            if entry['level'] == 'chapter' and i + 1 < len(toc_entries):
+                next_page = toc_entries[i + 1].get('page')
+                if next_page == entry['page']:
+                    continue
+
+            content = text[start:end].strip()
+            if not content:
+                continue
+
+            new_sections.append({
+                'content': content,
+                'heading': entry['heading'],
+                'level': entry['level'],
+                'chapter': ctx['chapter'],
+                'lesson': ctx['lesson'],
+                'section': ctx['section'],
+                'content_type': _detect_content_type(content),
+                'heading_path': _build_path(ctx),
+                'char_start': start,
+                'char_end': end,
+            })
+
+        if not new_sections:
+            logger.warning(
+                "[TOC Rebuild] No sections created — keeping original."
+            )
+            return sections
+
+        logger.info(
+            f"[TOC Rebuild] {len(new_sections)} sections from TOC"
+        )
+        for idx, sec in enumerate(new_sections):
+            logger.info(
+                f"  [{idx}] level={sec['level']}, "
+                f"chapter={sec['chapter']!r}, "
+                f"lesson={sec['lesson']!r}, "
+                f"path={sec['heading_path']!r}, "
+                f"chars={sec['char_start']}-{sec['char_end']} "
+                f"(~{sec['char_end'] - sec['char_start']} chars)"
+            )
+
+        return new_sections
 
     # ─── Section -> chunk(s) ──────────────────────────────────────────
 

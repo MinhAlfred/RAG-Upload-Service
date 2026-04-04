@@ -5,7 +5,7 @@ import logging
 from typing import List, Dict, Tuple
 import io
 import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor  # kept for embedding_service
 from PIL import Image
 import fitz  # PyMuPDF
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -58,81 +58,64 @@ class DocumentProcessor:
             # ------------------------------------------------------------------
             # Pass 1: collect page data without OCR (single thread – fitz safety)
             # ------------------------------------------------------------------
-            page_data: List[Dict] = []  # per-page: {text, img_bytes, needs_ocr}
+            # OCR every page — Vietnamese PDFs with legacy fonts (VNI/TCVN3)
+            # produce garbled text from direct extraction, so OCR all pages
+            # for consistent quality. GPT-4o-mini corrects OCR errors afterward.
+            page_data: List[Dict] = []
             for page_num in range(total_pages):
                 page = doc[page_num]
-                text = page.get_text()
-                garbled = self._is_text_garbled(text)
-                needs_ocr = len(text.strip()) < 50 or garbled
-
-                if needs_ocr:
-                    reason = "garbled encoding" if garbled and len(text.strip()) >= 50 else "scanned"
-                    logger.info(f"Page {page_num + 1}/{total_pages}: {reason} → queued for OCR")
-                    pix = page.get_pixmap(matrix=fitz.Matrix(2, 2)) # zoom 2x for better OCR accuracy
-                    img_bytes = pix.tobytes("png")
-                else:
-                    logger.info(f"Page {page_num + 1}/{total_pages}: text extracted {len(text)} chars")
-                    img_bytes = None
+                logger.info(f"Page {page_num + 1}/{total_pages}: rendering for OCR")
+                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+                img_bytes = pix.tobytes("png")
 
                 page_data.append({
                     "page_num": page_num,
-                    "direct_text": text if not needs_ocr else "",
+                    "direct_text": "",
                     "img_bytes": img_bytes,
-                    "needs_ocr": needs_ocr,
+                    "needs_ocr": True,
                 })
 
             doc.close()
 
             # ------------------------------------------------------------------
-            # Pass 2: parallel OCR for scanned pages
+            # Pass 2: Sequential OCR — process pages in order to guarantee
+            # correct page-to-text mapping.  Parallel OCR with as_completed
+            # caused page content to be associated with wrong page numbers.
             # ------------------------------------------------------------------
-            ocr_indices = [i for i, p in enumerate(page_data) if p["needs_ocr"]]
             ocr_results: Dict[int, str] = {}
+            logger.info(f"Running OCR on {total_pages} pages sequentially")
 
-            if ocr_indices:
-                # Use up to 4 workers; Tesseract is CPU-bound but each call uses 1 core
-                max_workers = min(4, len(ocr_indices))
-                logger.info(f"Running OCR on {len(ocr_indices)} pages with {max_workers} workers in parallel")
-
-                with ThreadPoolExecutor(max_workers=max_workers) as pool:
-                    future_to_idx = {
-                        pool.submit(self.extract_from_image, page_data[i]["img_bytes"]): i
-                        for i in ocr_indices
-                    }
-                    for future in as_completed(future_to_idx):
-                        idx = future_to_idx[future]
-                        try:
-                            ocr_results[idx] = future.result()
-                            logger.info(
-                                f"Page {page_data[idx]['page_num'] + 1}/{total_pages}: "
-                                f"OCR extracted {len(ocr_results[idx])} chars"
-                            )
-                        except Exception as exc:
-                            logger.error(f"OCR failed for page {page_data[idx]['page_num'] + 1}: {exc}")
-                            ocr_results[idx] = ""
+            for i, p in enumerate(page_data):
+                try:
+                    ocr_results[i] = self.extract_from_image(p["img_bytes"])
+                    logger.info(
+                        f"Page {p['page_num'] + 1}/{total_pages}: "
+                        f"OCR extracted {len(ocr_results[i])} chars"
+                    )
+                except Exception as exc:
+                    logger.error(f"OCR failed for page {p['page_num'] + 1}: {exc}")
+                    ocr_results[i] = ""
 
             # ------------------------------------------------------------------
             # Assemble results in original page order
             # ------------------------------------------------------------------
             full_text = []
             page_info = []
-            scanned_pages = sum(1 for p in page_data if p["needs_ocr"])
-            text_pages = total_pages - scanned_pages
 
             for i, p in enumerate(page_data):
-                page_text = ocr_results[i] if p["needs_ocr"] else p["direct_text"]
+                page_text = ocr_results[i]
                 full_text.append(page_text)
                 page_info.append({
                     "page_number": p["page_num"] + 1,
                     "text": page_text,
                     "char_start": sum(len(t) + 2 for t in full_text[:-1]),
                     "char_end": sum(len(t) + 2 for t in full_text[:-1]) + len(page_text),
-                    "ocr_used": p["needs_ocr"],
+                    "ocr_used": True,
                 })
 
             result = "\n\n".join(full_text)
             logger.info(
-                f"PDF processed: {text_pages} text pages, {scanned_pages} scanned pages, "
+                f"PDF processed: {total_pages} pages (all OCR), "
                 f"total {len(result)} chars"
             )
             return result, page_info
@@ -201,24 +184,43 @@ class DocumentProcessor:
         if len(sample) == 0:
             return True
 
+        # Vietnamese Unicode lives in:
+        #   Basic Latin        0x0000-0x007F
+        #   Latin Extended-A   0x0100-0x017F  (Ă, ă, Đ, đ)
+        #   Latin Extended-B   Ơ(01A0), ơ(01A1), Ư(01AF), ư(01B0) ONLY
+        #   Latin Ext Additional 0x1E00-0x1EFF (ắ, ề, ỏ, ...)
+        #   Combining Diacritics 0x0300-0x036F (tone marks)
+        #
+        # Anything else in a "Vietnamese" PDF is garbled.
+        _VIET_EXTENDED_B = {0x01A0, 0x01A1, 0x01AF, 0x01B0}
+
         suspicious = 0
         for ch in sample:
             cp = ord(ch)
-            # Cyrillic block – the most common artifact from legacy Vietnamese fonts
+            # Cyrillic block (most common garbled artifact)
             if 0x0400 <= cp <= 0x04FF:
                 suspicious += 1
             # Cyrillic Supplement
             elif 0x0500 <= cp <= 0x052F:
                 suspicious += 1
-            # Private Use Area – some PDFs embed glyphs here
+            # Private Use Area
             elif 0xE000 <= cp <= 0xF8FF:
                 suspicious += 1
-            # Combining Diacritical Marks Supplement (unusual outside linguistics)
+            # Combining Diacritical Marks Supplement
             elif 0x1DC0 <= cp <= 0x1DFF:
+                suspicious += 1
+            # IPA Extensions (ɑ, ɨ, ɥ, ...) — never in Vietnamese
+            elif 0x0250 <= cp <= 0x02AF:
+                suspicious += 1
+            # Spacing Modifier Letters (ʰ, ʲ, ...) — never in Vietnamese
+            elif 0x02B0 <= cp <= 0x02FF:
+                suspicious += 1
+            # Latin Extended-B — except Ơ/ơ/Ư/ư which ARE Vietnamese
+            elif 0x0180 <= cp <= 0x024F and cp not in _VIET_EXTENDED_B:
                 suspicious += 1
 
         ratio = suspicious / len(sample)
-        if ratio > 0.08:  # >8 % suspicious chars → garbled
+        if ratio > 0.05:  # >5% suspicious chars → garbled (lowered from 8%)
             logger.debug(
                 f"Garbled text detected: {suspicious}/{len(sample)} suspicious chars "
                 f"({ratio:.1%}), sample={sample[:60]!r}"
